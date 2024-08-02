@@ -1,27 +1,30 @@
 from collections import namedtuple
 
-# Define a namedtuple for tokens
+# Define a namedtuple for tokens with type and text attributes
 Token = namedtuple("Token", "type,text")
-_NOTHING = object()
+_NOTHING = object()  # Sentinel object to represent no value
 
+# Custom exception for parse errors
 class ParseError(Exception):
-    """Custom exception for parse errors."""
     pass
 
+# class to make an iterator peekable
 class _peekable:
-    """A helper class to allow peeking at the next item in an iterator."""
     def __init__(self, it):
-        self._it = it
-        self._peeked = _NOTHING
+        self._it = it  # The underlying iterator
+        self._peeked = _NOTHING  # The peeked value, initially set to _NOTHING
 
     def __next__(self):
+        # If there's a peeked value, return it and reset _peeked
         if self._peeked is not _NOTHING:
             val = self._peeked
             self._peeked = _NOTHING
             return val
+        # Otherwise, return the next value from the iterator
         return next(self._it)
 
     def peek(self):
+        # If there's no peeked value, get the next value from the iterator
         if self._peeked is _NOTHING:
             try:
                 self._peeked = next(self._it)
@@ -29,11 +32,11 @@ class _peekable:
                 self._peeked = None
         return self._peeked
 
+# Function to scan the input text and generate tokens
 def scan(text):
-    """Tokenize the input text."""
     yield from _scan(_peekable(iter(text)))
 
-# Define one-character tokens and keywords
+# Mapping of single-character tokens to their types
 _one_char_tokens = {
     ",": "COMMA",
     "(": "LPAREN",
@@ -43,40 +46,46 @@ _one_char_tokens = {
     "=": "EQUAL",
 }
 
+# Mapping of keywords to their types
 _keywords = {
     "SELECT".casefold(): "SELECT",
     "FROM".casefold(): "FROM",
     "WHERE".casefold(): "WHERE",
+    "CREATE".casefold(): "CREATE",
+    "TABLE".casefold(): "TABLE",
 }
 
+# Internal function to scan the input and generate tokens
 def _scan(it):
-    """Scan the input text and generate tokens."""
     while True:
-        c = next(it, None)
+        c = next(it, None)  # Get the next character
         if c is None:
-            break
+            break  # End of input
 
         if c.isspace():
-            continue
+            continue  # Skip whitespace
         elif c in _one_char_tokens:
-            yield Token(_one_char_tokens[c], c)
+            yield Token(_one_char_tokens[c], c)  # Single-character token
         elif c.isalpha():
+            # Handle identifiers and keywords
             name = c
-            while it.peek() is not None and it.peek().isalnum():
+            while it.peek() is not None and (it.peek().isalnum() or it.peek() == "_"):
                 name += next(it)
             if name.casefold() in _keywords:
                 yield Token(_keywords[name.casefold()], name)
             else:
                 yield Token("NAME", name)
-        elif c == "'":
+        elif c in ("'", '"'):
+            # Handle string literals
+            terminator = c
             str_content = ""
             while True:
                 c = next(it, None)
                 if c is None:
                     raise ParseError("Unterminated string literal")
-                if c == "'":
-                    if it.peek() == "'":
-                        str_content += "'"
+                if c == terminator:
+                    if it.peek() == terminator:
+                        str_content += terminator
                     else:
                         break
                 else:
@@ -85,31 +94,45 @@ def _scan(it):
         else:
             raise ParseError(f"Unexpected token {c!r}")
 
+# Function to expect a specific token type from the iterator
+def _expect(it, ty):
+    try:
+        tok = next(it)
+    except StopIteration:
+        raise ParseError(f"Expected {ty}, got end of input")
+    if tok.type != ty:
+        raise ParseError(f"Expected {ty}, got {tok.type}")
+    return tok
+
+# Function to parse the input text and generate parse trees
 def parse(text):
-    """Parse the input text and generate statements."""
     yield from _parse(_peekable(scan(text)))
 
-# Define namedtuples for different types of expressions and statements
+# Define namedtuples for different types of parse trees
 SelectStmt = namedtuple("SelectStmt", "selects,from_table,where")
+CreateTableStmt = namedtuple("CreateTableStmt", "name,columns")
+CreateTableField = namedtuple("CreateTableField", "name,type")
 FunctionExpr = namedtuple("FunctionExpr", "name,args")
 NameExpr = namedtuple("NameExpr", "name")
 StarExpr = namedtuple("StarExpr", "")
 BinaryExpr = namedtuple("BinaryExpr", "op,lhs,rhs")
 StringExpr = namedtuple("StringExpr", "text")
 
+# Internal function to parse the input and generate parse trees
 def _parse(it):
-    """Parse the tokens and generate a statement."""
     if it.peek() and it.peek().type == "SELECT":
         yield _parse_select_stmt(it)
+    elif it.peek() and it.peek().type == "CREATE":
+        yield _parse_create_table(it)
     else:
         raise ParseError(f"Unexpected token {it.peek()!r}")
 
     if it.peek() is not None:
         raise ParseError(f"Trailing characters after query: {it.peek()!r}")
 
+# Function to parse a SELECT statement
 def _parse_select_stmt(it):
-    """Parse a SELECT statement."""
-    next(it)
+    _expect(it, "SELECT")
 
     selects = []
     first = True
@@ -117,23 +140,12 @@ def _parse_select_stmt(it):
         if first:
             first = False
         else:
-            comma = next(it, None)
-            if not comma or comma.type != "COMMA":
-                raise ParseError(f"Expected comma, got {comma!r}")
+            _expect(it, "COMMA")
         selects.append(_parse_selection(it))
 
-    if not it.peek() or it.peek().type != "FROM":
-        raise ParseError(f"Expected 'FROM', got {it.peek()!r}")
+    _expect(it, "FROM")
 
-    next(it)
-
-    try:
-        from_table = next(it)
-    except StopIteration:
-        raise ParseError("Unexpected end of input, expected name")
-
-    if from_table.type != "NAME":
-        raise ParseError(f"Expected name, got {from_table.text!r}")
+    from_table = _expect(it, "NAME")
 
     tok = next(it, None)
     where = None
@@ -157,8 +169,8 @@ def _parse_select_stmt(it):
 
     return SelectStmt(selects, from_table.text, where)
 
+# Function to parse a selection in a SELECT statement
 def _parse_selection(it):
-    """Parse a selection expression."""
     name = next(it, None)
     if not name or name.type not in ("NAME", "STAR"):
         raise ParseError(f"Expected name or '*', got {name!r}")
@@ -176,13 +188,45 @@ def _parse_selection(it):
         if first:
             first = False
         else:
-            comma = next(it, None)
-            if comma is None or comma.type != "COMMA":
-                raise ParseError(f"Expected comma, got {comma!r}")
+            _expect(it, "COMMA")
         args.append(_parse_selection(it))
 
-    rparen = next(it, None)
-    if rparen is None or rparen.type != "RPAREN":
-        raise ParseError(f"Expected rparen, got {rparen!r}")
+    _expect(it, "RPAREN")
 
     return FunctionExpr(name.text.upper(), args)
+
+# Function to parse a CREATE TABLE statement
+def _parse_create_table(it):
+    _expect(it, "CREATE")
+    _expect(it, "TABLE")
+
+    name = next(it, None)
+    if name is None:
+        raise ParseError("Unexpected end of input, expected table name")
+    elif name.type not in ("NAME", "STRING"):
+        raise ParseError(f"Expected table name to be string or name, got {name.text!r}")
+
+    table_name = name.text
+
+    _expect(it, "LPAREN")
+    columns = []
+    first = True
+    while it.peek() and it.peek().type != "RPAREN":
+        if first:
+            first = False
+        else:
+            _expect(it, "COMMA")
+        col_name = _expect(it, "NAME").text
+        type_parts = []
+        while it.peek() and it.peek().type not in ("COMMA", "RPAREN"):
+            type_parts.append(_expect(it, "NAME").text)
+        col_type = " ".join(type_parts)
+        columns.append(CreateTableField(col_name, col_type))
+
+    _expect(it, "RPAREN")
+
+    tok = next(it, None)
+    if tok and tok.type != "SEMICOLON":
+        raise ParseError(f"Expected end of input or semicolon, got {tok.text!r}")
+
+    return CreateTableStmt(table_name, tuple(columns))
